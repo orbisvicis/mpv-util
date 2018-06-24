@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+
+import os
+import stat
+import enum
+import argparse
+import os.path
+import posixpath
+
+import smbc
+
+
+class Strategy(enum.Enum):
+    Exact = enum.auto()
+    Fuzzy = enum.auto()
+    All = enum.auto()
+
+    def __str__(self):
+        return self.name.lower()
+
+
+def strategy_from_str(s):
+    try:
+        return {k.lower():v for k,v in Strategy.__members__.items()}[s.lower()]
+    except KeyError:
+        message = "invalid choice: {} (choose from: {})"
+        message = message.format(s, ", ".join(map(str, Strategy)))
+        raise argparse.ArgumentTypeError(message) from None
+
+def add_remote_subtitles(args, strategy):
+    extensions = [".srt", ".ass", ".sub"]
+    smbc_exceptions = ( smbc.ConnectionRefusedError
+                      , smbc.NoEntryError
+                      , smbc.PermissionError
+                      , smbc.TimedOutError
+                      , ValueError
+                      )
+    ignore = ( expand_list_arg("--sub-files")
+             + ["--sub-file"]
+             + expand_list_arg("--sub-file-paths")
+             )
+    ctx = smbc.Context()
+    smb_args = set(arg.rstrip("/") for arg in args
+                   if arg.startswith("smb://"))
+    smb_parents = set()
+    for i,arg in enumerate(args):
+        yield arg
+        if not arg.startswith("smb://"):
+            continue
+        if i and args[i-1] in ignore:
+            continue
+        arg = arg.rstrip("/")
+        parent,name = posixpath.split(arg)
+        if parent in smb_parents:
+            continue
+        if os.path.splitext(name)[1] in extensions:
+            continue
+        try:
+            mode = ctx.stat(arg)[stat.ST_MODE]
+            if stat.S_ISDIR(mode):
+                continue
+            smb_parents.add(parent)
+            entries = ctx.opendir(parent).getdents()
+        except smbc_exceptions:
+            continue
+        for entry in entries:
+            entry_path = parent + "/" + entry.name
+            if entry_path in smb_args:
+                continue
+            if entry.smbc_type != smbc.FILE:
+                continue
+            if os.path.splitext(entry.name)[1] not in extensions:
+                continue
+            if not match_strategy(name, entry.name, strategy):
+                continue
+            yield "--sub-files-append"
+            yield entry_path
+
+def match_strategy(template, name, strategy):
+    t = os.path.splitext(template)
+    n = os.path.splitext(name)
+    if strategy is Strategy.All:
+        return True
+    elif strategy is Strategy.Fuzzy:
+        return name.startswith(t[0])
+    elif strategy is Strategy.Exact:
+        return t[0] == n[0]
+    else:
+        return False
+
+def expand_list_arg(arg):
+    suffixes = [ "add", "append", "clr", "del", "pre", "set"]
+    return [arg + "-" + s for s in suffixes]
+
+def remove_option_marker(args):
+    if args[0:1] == ["--"]:
+        args = args[1:]
+    return args
+
+def build_args(all_args):
+    return list(add_remote_subtitles\
+                    ( remove_option_marker(all_args.args)
+                    , all_args.strategy
+                    ))
+
+
+parser = argparse.ArgumentParser\
+    ( description = 
+        "An 'mpv' wrapper that, for each Samba file URI, appends all matching "
+        "subtitle files from the corresponding directory to the list of "
+        "external subtitles by supplementing the command-line arguments using "
+        "'--sub-files-add'. Avoids adding duplicate files and minimizes "
+        "server queries."
+    )
+parser.add_argument\
+    ( "-s", "--strategy"
+    , default = Strategy.Exact
+    , type = strategy_from_str
+    , choices = Strategy
+    , help = "Stategy for matching subtitles files."
+    )
+parser.add_argument\
+    ( "args"
+    , nargs=argparse.REMAINDER
+    , help =
+        "Arguments for 'mpv'. Use '--' to interrupt parsing of optional "
+        "arguments specific to this wrapper."
+    , metavar = "<args>"
+    )
+
+
+args = parser.parse_args()
+
+#for i in build_args(args):
+#    print(i)
+
+os.execvp\
+    ( "mpv"
+    , ["mpv"] + build_args(args)
+    )
