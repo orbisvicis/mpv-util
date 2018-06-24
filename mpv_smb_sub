@@ -120,6 +120,12 @@ parser.add_argument\
     , help = "Stategy for matching subtitles files."
     )
 parser.add_argument\
+    ( "-f", "--file"
+    , default = "mpv"
+    , help = "Execute the given file. If this argument does not contain a "
+             "slash, search the PATH environment variable. Defaults to 'mpv'."
+    )
+parser.add_argument\
     ( "args"
     , nargs=argparse.REMAINDER
     , help =
@@ -135,6 +141,6 @@ args = parser.parse_args()
 #    print(i)
 
 os.execvp\
-    ( "mpv"
+    ( args.file
     , ["mpv"] + build_args(args)
     )
